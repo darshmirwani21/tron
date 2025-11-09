@@ -137,7 +137,7 @@ class TronAgent:
                 - opponent_last_direction: Last direction opponent moved
         
         Returns:
-            str: Direction to move ('up', 'down', 'left', 'right')
+            str: Direction to move ('UP', 'DOWN', 'LEFT', 'RIGHT')
         """
         my_pos = tuple(state['my_position'])
         opp_pos = tuple(state['opponent_position'])
