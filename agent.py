@@ -14,177 +14,8 @@ LAST_POSTED_STATE = {}
 
 game_lock = Lock()
  
-PARTICIPANT = "CaseClosed"
-AGENT_NAME = "SmartTronAgent"
-
-class Pathfinder:
-    """Pathfinding algorithms for grid navigation with torus wrapping."""
-    
-    def __init__(self, width: int = 20, height: int = 18):
-        """Initialize pathfinder."""
-        self.width = width
-        self.height = height
-        self.directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-    
-    def _normalize_pos(self, pos: Tuple[int, int]) -> Tuple[int, int]:
-        """Normalize position for torus wrapping."""
-        return (pos[0] % self.width, pos[1] % self.height)
-    
-    def flood_fill(self, start: Tuple[int, int], board: List[List[int]]) -> Set[Tuple[int, int]]:
-        """Flood fill to find all connected empty cells."""
-        start = self._normalize_pos(start)
-        visited = set()
-        queue = deque([start])
-        visited.add(start)
-        
-        while queue:
-            x, y = queue.popleft()
-            
-            for dx, dy in self.directions:
-                new_pos = self._normalize_pos((x + dx, y + dy))
-                
-                if new_pos not in visited and board[new_pos[1]][new_pos[0]] == 0:
-                    visited.add(new_pos)
-                    queue.append(new_pos)
-        
-        return visited
-
-
-class TronAgent:
-    """Main agent class for Tron game decision-making."""
-    
-    def __init__(self):
-        """Initialize the agent."""
-        self.board_width = 20
-        self.board_height = 18
-        self.directions = {
-            'UP': (0, -1),
-            'DOWN': (0, 1),
-            'LEFT': (-1, 0),
-            'RIGHT': (1, 0)
-        }
-        self.direction_names = ['UP', 'DOWN', 'LEFT', 'RIGHT']
-        self.last_move = None
-        self.pathfinder = Pathfinder(self.board_width, self.board_height)
-    
-    def _get_valid_moves(self, position: Tuple[int, int], board: List[List[int]]) -> List[str]:
-        """Get all valid moves from current position."""
-        valid = []
-        x, y = position
-        
-        for direction, (dx, dy) in self.directions.items():
-            new_x = (x + dx) % self.board_width  # Torus wrapping
-            new_y = (y + dy) % self.board_height
-            
-            # Check if cell is empty (0 = empty, 1 = trail)
-            if board[new_y][new_x] == 0:
-                valid.append(direction)
-        
-        return valid
-    
-    def _calculate_safety_distance(self, pos: Tuple[int, int], board: List[List[int]]) -> int:
-        """Calculate minimum distance to nearest obstacle."""
-        safety = float('inf')
-        x, y = pos
-        
-        for i in range(self.board_height):
-            for j in range(self.board_width):
-                if board[i][j] == 1:
-                    dx = min(abs(x - j), self.board_width - abs(x - j))
-                    dy = min(abs(y - i), self.board_height - abs(y - i))
-                    safety = min(safety, dx + dy)
-        
-        return safety if safety != float('inf') else 0
-    
-    def _torus_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
-        """Calculate Manhattan distance with torus wrapping."""
-        dx = min(abs(pos1[0] - pos2[0]), self.board_width - abs(pos1[0] - pos2[0]))
-        dy = min(abs(pos1[1] - pos2[1]), self.board_height - abs(pos1[1] - pos2[1]))
-        return dx + dy
-
-    def _should_use_boost(self, my_pos: Tuple[int, int], opp_pos: Tuple[int, int], board: List[List[int]], boosts: int, turn_count: int) -> bool:
-        """Decide whether to use a boost."""
-        if boosts <= 0 or turn_count < 5:
-            return False
-            
-        dist_to_opp = self._torus_distance(my_pos, opp_pos)
-        space_around = len(self.pathfinder.flood_fill(my_pos, board))
-        
-        # Use boost if we have good amount of space and opponent is somewhat far
-        return space_around > 100 and dist_to_opp > 3
-
-    def get_move(self, state: dict, player_number: int) -> str:
-        """Main decision-making function."""
-        # Extract positions from state
-        if player_number == 1:
-            my_trail = state.get('agent1_trail', [])
-            opp_trail = state.get('agent2_trail', [])
-            my_boosts = state.get('agent1_boosts', 3)
-        else:
-            my_trail = state.get('agent2_trail', [])
-            opp_trail = state.get('agent1_trail', [])
-            my_boosts = state.get('agent2_boosts', 3)
-        
-        if not my_trail or not opp_trail:
-            return 'RIGHT'
-        
-        my_pos = tuple(my_trail[-1])
-        opp_pos = tuple(opp_trail[-1])
-        board = state.get('board', [[0]*20 for _ in range(18)])
-        turn_count = state.get('turn_count', 0)
-        
-        # Get all valid moves
-        valid_moves = self._get_valid_moves(my_pos, board)
-        
-        if not valid_moves:
-            return random.choice(self.direction_names)
-        
-        # Evaluate each valid move
-        best_move = None
-        best_score = float('-inf')
-        
-        for move in valid_moves:
-            dx, dy = self.directions[move]
-            new_x = (my_pos[0] + dx) % self.board_width
-            new_y = (my_pos[1] + dy) % self.board_height
-            new_pos = (new_x, new_y)
-            
-            # Create simulated board
-            sim_board = [row[:] for row in board]
-            sim_board[new_y][new_x] = 1
-            
-            score = 0
-            
-            # 1. Survival: accessible space
-            accessible_space = len(self.pathfinder.flood_fill(new_pos, sim_board))
-            score += accessible_space * 10
-            
-            # 2. Safety distance
-            safety_dist = self._calculate_safety_distance(new_pos, sim_board)
-            score += safety_dist * 2
-            
-            # 3. Opponent proximity - prefer staying at medium distance
-            dist_to_opp = self._torus_distance(new_pos, opp_pos)
-            if dist_to_opp < 2:  # Too close
-                score -= 50
-            elif dist_to_opp > 8:  # Too far
-                score -= 20
-            
-            if score > best_score:
-                best_score = score
-                best_move = move
-        
-        best_move = best_move or random.choice(valid_moves)
-        
-        # Decide whether to use boost
-        use_boost = self._should_use_boost(my_pos, opp_pos, board, my_boosts, turn_count)
-        
-        self.last_move = best_move
-        return f"{best_move}:BOOST" if use_boost else best_move
-
-# Initialize pathfinder and agent
-pathfinder = Pathfinder()
-tron_agent = TronAgent()
+PARTICIPANT = "ParticipantX"
+AGENT_NAME = "AgentX"
 
 
 @app.route("/", methods=["GET"])
@@ -264,146 +95,15 @@ def send_move():
         my_agent = GLOBAL_GAME.agent1 if player_number == 1 else GLOBAL_GAME.agent2
         boosts_remaining = my_agent.boosts_remaining
    
-    # Get the move from our TronAgent
-    move = tron_agent.get_move(state, player_number)
-    "board": None,
-    "agent1_trail": [],
-    "agent2_trail": [],
-    "agent1_length": 0,
-    "agent2_length": 0,
-    "agent1_alive": True,
-    "agent2_alive": True,
-    "agent1_boosts": 3,
-    "agent2_boosts": 3,
-    "turn_count": 0,
-    "player_number": 1,
-}
+    # -----------------your code here-------------------
+    """
+Case Closed - Tron Lightbike Agent
+An intelligent agent for competitive Tron gameplay.
+"""
 
-
-class Pathfinder:
-    """Pathfinding algorithms for grid navigation with torus wrapping."""
-    
-    def __init__(self, width: int = 20, height: int = 18):
-        """Initialize pathfinder."""
-        self.width = width
-        self.height = height
-        self.directions = [(0, -1), (0, 1), (-1, 0), (1, 0)]
-    
-    def _normalize_pos(self, pos: Tuple[int, int]) -> Tuple[int, int]:
-        """Normalize position for torus wrapping."""
-        return (pos[0] % self.width, pos[1] % self.height)
-    
-    def bfs(
-        self, 
-        start: Tuple[int, int], 
-        goal: Tuple[int, int],
-        board: List[List[int]]
-    ) -> Optional[List[Tuple[int, int]]]:
-        """Breadth-first search to find shortest path."""
-        start = self._normalize_pos(start)
-        goal = self._normalize_pos(goal)
-        
-        if start == goal:
-            return [start]
-        
-        queue = deque([(start, [start])])
-        visited = {start}
-        
-        while queue:
-            (x, y), path = queue.popleft()
-            
-            for dx, dy in self.directions:
-                new_pos = self._normalize_pos((x + dx, y + dy))
-                
-                if new_pos == goal:
-                    return path + [goal]
-                
-                if new_pos not in visited and board[new_pos[1]][new_pos[0]] == 0:
-                    visited.add(new_pos)
-                    queue.append((new_pos, path + [new_pos]))
-        
-        return None
-    
-    def a_star(
-        self, 
-        start: Tuple[int, int], 
-        goal: Tuple[int, int],
-        board: List[List[int]]
-    ) -> Optional[List[Tuple[int, int]]]:
-        """A* pathfinding algorithm with torus distance."""
-        from heapq import heappush, heappop
-        
-        def heuristic(pos: Tuple[int, int]) -> int:
-            """Manhattan distance with torus wrapping."""
-            dx = min(abs(pos[0] - goal[0]), self.width - abs(pos[0] - goal[0]))
-            dy = min(abs(pos[1] - goal[1]), self.height - abs(pos[1] - goal[1]))
-            return dx + dy
-        
-        start = self._normalize_pos(start)
-        goal = self._normalize_pos(goal)
-        
-        if start == goal:
-            return [start]
-        
-        open_set = [(0, start)]
-        came_from = {}
-        g_score = {start: 0}
-        f_score = {start: heuristic(start)}
-        visited = set()
-        
-        while open_set:
-            current_f, current = heappop(open_set)
-            
-            if current in visited:
-                continue
-            
-            visited.add(current)
-            
-            if current == goal:
-                # Reconstruct path
-                path = [current]
-                while current in came_from:
-                    current = came_from[current]
-                    path.append(current)
-                return path[::-1]
-            
-            x, y = current
-            for dx, dy in self.directions:
-                neighbor = self._normalize_pos((x + dx, y + dy))
-                
-                if board[neighbor[1]][neighbor[0]] == 0:
-                    tentative_g = g_score.get(current, float('inf')) + 1
-                    
-                    if tentative_g < g_score.get(neighbor, float('inf')):
-                        came_from[neighbor] = current
-                        g_score[neighbor] = tentative_g
-                        f_score[neighbor] = tentative_g + heuristic(neighbor)
-                        heappush(open_set, (f_score[neighbor], neighbor))
-        
-        return None
-    
-    def flood_fill(
-        self, 
-        start: Tuple[int, int], 
-        board: List[List[int]]
-    ) -> Set[Tuple[int, int]]:
-        """Flood fill to find all connected empty cells."""
-        start = self._normalize_pos(start)
-        visited = set()
-        queue = deque([start])
-        visited.add(start)
-        
-        while queue:
-            x, y = queue.popleft()
-            
-            for dx, dy in self.directions:
-                new_pos = self._normalize_pos((x + dx, y + dy))
-                
-                if new_pos not in visited and board[new_pos[1]][new_pos[0]] == 0:
-                    visited.add(new_pos)
-                    queue.append(new_pos)
-        
-        return visited
+from collections import deque
+from typing import List, Tuple, Optional, Dict, Set
+import random
 
 
 class TronAgent:
@@ -414,74 +114,79 @@ class TronAgent:
         self.board_width = 20
         self.board_height = 18
         self.directions = {
-            'UP': (0, -1),
-            'DOWN': (0, 1),
-            'LEFT': (-1, 0),
-            'RIGHT': (1, 0)
+            'up': (0, -1),
+            'down': (0, 1),
+            'left': (-1, 0),
+            'right': (1, 0)
         }
-        self.direction_names = ['UP', 'DOWN', 'LEFT', 'RIGHT']
+        self.direction_names = ['up', 'down', 'left', 'right']
         self.last_move = None
         self.opponent_history = []
-        self.pathfinder = Pathfinder(self.board_width, self.board_height)
         
-    def get_move(self, state: dict, player_number: int) -> str:
+    def get_move(self, state: dict) -> str:
         """
-        Main decision-making function.
+        Main decision-making function called by the game engine.
         
         Args:
-            state: Dictionary containing game state
-            player_number: 1 or 2 indicating which player we are
+            state: Dictionary containing game state information:
+                - my_position: (x, y) tuple of current position
+                - opponent_position: (x, y) tuple of opponent position
+                - board: 2D list representing the board (0=empty, 1=wall/trail)
+                - boosts: Available boosts (if any)
+                - turns_remaining: Number of turns left
+                - opponent_last_direction: Last direction opponent moved
         
         Returns:
-            str: Direction to move ('UP', 'DOWN', 'LEFT', 'RIGHT')
-                 or 'DIRECTION:BOOST' to use a boost
+            str: Direction to move ('up', 'down', 'left', 'right')
         """
-        # Extract positions from state
-        if player_number == 1:
-            my_trail = state.get('agent1_trail', [])
-            opp_trail = state.get('agent2_trail', [])
-            my_boosts = state.get('agent1_boosts', 3)
-        else:
-            my_trail = state.get('agent2_trail', [])
-            opp_trail = state.get('agent1_trail', [])
-            my_boosts = state.get('agent2_boosts', 3)
+        my_pos = tuple(state['my_position'])
+        opp_pos = tuple(state['opponent_position'])
+        board = state['board']
+        opponent_last_dir = state.get('opponent_last_direction', None)
         
-        if not my_trail or not opp_trail:
-            return 'RIGHT'
-        
-        my_pos = tuple(my_trail[-1])
-        opp_pos = tuple(opp_trail[-1])
-        board = state.get('board', [[0]*20 for _ in range(18)])
-        turn_count = state.get('turn_count', 0)
+        # Update opponent history
+        if opponent_last_dir:
+            self.opponent_history.append(opponent_last_dir)
+            if len(self.opponent_history) > 10:
+                self.opponent_history.pop(0)
         
         # Get all valid moves
         valid_moves = self._get_valid_moves(my_pos, board)
         
         if not valid_moves:
+            # No valid moves, return a random direction (shouldn't happen)
             return random.choice(self.direction_names)
         
-        # Evaluate moves and choose best
-        best_move = self._evaluate_moves(my_pos, opp_pos, board, valid_moves, state)
-        
-        # Decide whether to use boost
-        use_boost = self._should_use_boost(my_pos, opp_pos, board, my_boosts, turn_count)
+        # Evaluate each move and choose the best one
+        best_move = self._evaluate_moves(
+            my_pos, opp_pos, board, valid_moves, state
+        )
         
         self.last_move = best_move
-        
-        if use_boost:
-            return f"{best_move}:BOOST"
         return best_move
     
     def _get_valid_moves(self, position: Tuple[int, int], board: List[List[int]]) -> List[str]:
-        """Get all valid moves from current position."""
+        """
+        Get all valid moves from current position.
+        
+        Args:
+            position: Current (x, y) position
+            board: 2D board representation
+        
+        Returns:
+            List of valid direction names
+        """
         valid = []
         x, y = position
         
         for direction, (dx, dy) in self.directions.items():
-            new_x = (x + dx) % self.board_width  # Torus wrapping
-            new_y = (y + dy) % self.board_height
+            new_x, new_y = x + dx, y + dy
             
-            # Check if cell is empty (0 = empty, 1 = trail)
+            # Check bounds
+            if new_x < 0 or new_x >= self.board_width or new_y < 0 or new_y >= self.board_height:
+                continue
+            
+            # Check if cell is empty (0 = empty, 1 = wall/trail)
             if board[new_y][new_x] == 0:
                 valid.append(direction)
         
@@ -495,32 +200,396 @@ class TronAgent:
         valid_moves: List[str],
         state: dict
     ) -> str:
-        """Evaluate all valid moves and return the best one."""
+        """
+        Evaluate all valid moves and return the best one.
+        
+        Uses multiple strategies:
+        1. Survival: Avoid immediate danger
+        2. Space calculation: Maximize accessible space
+        3. Opponent blocking: Try to limit opponent's space
+        4. Pathfinding: Find safe paths to open areas
+        """
         move_scores = {}
         
         for move in valid_moves:
             dx, dy = self.directions[move]
-            new_x = (my_pos[0] + dx) % self.board_width
-            new_y = (my_pos[1] + dy) % self.board_height
-            new_pos = (new_x, new_y)
+            new_pos = (my_pos[0] + dx, my_pos[1] + dy)
             
-            # Create simulated board
+            # Create a simulated board with this move
             sim_board = [row[:] for row in board]
-            sim_board[new_y][new_x] = 1
+            sim_board[new_pos[1]][new_pos[0]] = 1
             
             score = 0
             
-            # 1. Survival: accessible space (using pathfinder flood fill)
-            accessible_space = len(self.pathfinder.flood_fill(new_pos, sim_board))
-            score += accessible_space * 10
+            # 1. Survival score: How much space is accessible from this position?
+            accessible_space = self._calculate_accessible_space(new_pos, sim_board)
+            score += accessible_space * 10  # High weight on survival
             
-            # 2. Safety distance
+            # 2. Safety score: Distance to nearest wall/trail
             safety_dist = self._calculate_safety_distance(new_pos, sim_board)
             score += safety_dist * 2
             
-            # 3. Opponent proximity
-            dist_to_opp = self._torus_distance(new_pos, opp_pos)
-            score += dist_to_opp
+            # 3. Opponent proximity: Maintain safe distance (not too close, not too far)
+            dist_to_opp = abs(new_pos[0] - opp_pos[0]) + abs(new_pos[1] - opp_pos[1])
+            if dist_to_opp < 3:
+                score -= 5  # Too close is dangerous
+            elif dist_to_opp > 10:
+                score += 2  # Too far means we're not controlling space
+            
+            # 4. Territory control: How much area can we claim?
+            territory = self._calculate_territory_control(new_pos, opp_pos, sim_board)
+            score += territory * 3
+            
+            # 5. Pathfinding: Can we reach open areas?
+            path_score = self._evaluate_pathfinding(new_pos, sim_board)
+            score += path_score * 5
+            
+            # 6. Opponent prediction: Try to block opponent's likely moves
+            block_score = self._evaluate_blocking(new_pos, opp_pos, sim_board, state)
+            score += block_score * 2
+            
+            # 7. Avoid corners early in game
+            if self._is_corner(new_pos):
+                score -= 3
+            
+            move_scores[move] = score
+        
+        # Return move with highest score
+        if move_scores:
+            best_move = max(move_scores, key=move_scores.get)
+            return best_move
+        
+        # Fallback to first valid move
+        return valid_moves[0] if valid_moves else 'up'
+    
+    def _calculate_accessible_space(
+        self, 
+        position: Tuple[int, int], 
+        board: List[List[int]]
+    ) -> int:
+        """
+        Calculate accessible space using BFS flood fill.
+        
+        Args:
+            position: Starting position
+            board: Board state
+        
+        Returns:
+            Number of accessible cells
+        """
+        visited = set()
+        queue = deque([position])
+        visited.add(position)
+        
+        while queue:
+            x, y = queue.popleft()
+            
+            for dx, dy in self.directions.values():
+                new_x, new_y = x + dx, y + dy
+                new_pos = (new_x, new_y)
+                
+                if (new_pos not in visited and 
+                    0 <= new_x < self.board_width and 
+                    0 <= new_y < self.board_height and
+                    board[new_y][new_x] == 0):
+                    visited.add(new_pos)
+                    queue.append(new_pos)
+        
+        return len(visited)
+    
+    def _calculate_safety_distance(
+        self, 
+        position: Tuple[int, int], 
+        board: List[List[int]]
+    ) -> int:
+        """
+        Calculate minimum distance to nearest wall/trail.
+        
+        Args:
+            position: Current position
+            board: Board state
+        
+        Returns:
+            Minimum distance to wall
+        """
+        visited = set()
+        queue = deque([(position, 0)])
+        visited.add(position)
+        
+        while queue:
+            (x, y), dist = queue.popleft()
+            
+            # If we found a wall, return the distance
+            if board[y][x] == 1 and dist > 0:
+                return dist
+            
+            for dx, dy in self.directions.values():
+                new_x, new_y = x + dx, y + dy
+                new_pos = (new_x, new_y)
+                
+                if (new_pos not in visited and 
+                    0 <= new_x < self.board_width and 
+                    0 <= new_y < self.board_height):
+                    visited.add(new_pos)
+                    queue.append((new_pos, dist + 1))
+        
+        return 10  # Default safe distance
+    
+    def _calculate_territory_control(
+        self, 
+        my_pos: Tuple[int, int], 
+        opp_pos: Tuple[int, int],
+        board: List[List[int]]
+    ) -> int:
+        """
+        Calculate territory control difference.
+        
+        Args:
+            my_pos: Our position
+            opp_pos: Opponent position
+            board: Board state
+        
+        Returns:
+            Difference in accessible territory (ours - theirs)
+        """
+        my_space = self._calculate_accessible_space(my_pos, board)
+        
+        # Simulate opponent's accessible space
+        opp_board = [row[:] for row in board]
+        my_space_from_opp = self._calculate_accessible_space(opp_pos, opp_board)
+        
+        return my_space - my_space_from_opp
+    
+    def _evaluate_pathfinding(
+        self, 
+        position: Tuple[int, int], 
+        board: List[List[int]]
+    ) -> float:
+        """
+        Evaluate pathfinding quality using A* heuristic.
+        
+        Args:
+            position: Current position
+            board: Board state
+        
+        Returns:
+            Pathfinding score (higher is better)
+        """
+        # Find the center of largest open area
+        open_areas = self._find_open_areas(board)
+        if not open_areas:
+            return 0.0
+        
+        # Find distance to nearest large open area
+        min_dist = float('inf')
+        for area_center, area_size in open_areas:
+            dist = abs(position[0] - area_center[0]) + abs(position[1] - area_center[1])
+            if dist < min_dist:
+                min_dist = dist
+        
+        # Inverse distance (closer is better)
+        return 10.0 / (min_dist + 1)
+    
+    def _find_open_areas(self, board: List[List[int]]) -> List[Tuple[Tuple[int, int], int]]:
+        """
+        Find centers and sizes of open areas on the board.
+        
+        Args:
+            board: Board state
+        
+        Returns:
+            List of (center_position, area_size) tuples
+        """
+        visited = set()
+        areas = []
+        
+        for y in range(self.board_height):
+            for x in range(self.board_width):
+                if board[y][x] == 0 and (x, y) not in visited:
+                    # BFS to find connected area
+                    area_cells = []
+                    queue = deque([(x, y)])
+                    visited.add((x, y))
+                    
+                    while queue:
+                        cx, cy = queue.popleft()
+                        area_cells.append((cx, cy))
+                        
+                        for dx, dy in self.directions.values():
+                            new_x, new_y = cx + dx, cy + dy
+                            new_pos = (new_x, new_y)
+                            
+                            if (new_pos not in visited and 
+                                0 <= new_x < self.board_width and 
+                                0 <= new_y < self.board_height and
+                                board[new_y][new_x] == 0):
+                                visited.add(new_pos)
+                                queue.append(new_pos)
+                    
+                    if area_cells:
+                        # Calculate center
+                        avg_x = sum(cell[0] for cell in area_cells) // len(area_cells)
+                        avg_y = sum(cell[1] for cell in area_cells) // len(area_cells)
+                        areas.append(((avg_x, avg_y), len(area_cells)))
+        
+        # Sort by size (largest first)
+        areas.sort(key=lambda x: x[1], reverse=True)
+        return areas[:3]  # Return top 3 areas
+    
+    def _evaluate_blocking(
+        self, 
+        my_pos: Tuple[int, int], 
+        opp_pos: Tuple[int, int],
+        board: List[List[int]],
+        state: dict
+    ) -> float:
+        """
+        Evaluate how well this move blocks the opponent.
+        
+        Args:
+            my_pos: Our new position
+            opp_pos: Opponent position
+            board: Board state
+            state: Full game state
+        
+        Returns:
+            Blocking score
+        """
+        # Predict opponent's next move
+        opp_moves = self._predict_opponent_moves(opp_pos, board, state)
+        
+        if not opp_moves:
+            return 0.0
+        
+        # Check if our move reduces opponent's options
+        blocking_score = 0.0
+        
+        # Calculate opponent's accessible space after our move
+        opp_accessible = self._calculate_accessible_space(opp_pos, board)
+        
+        # If we're cutting off a path, that's good
+        if opp_accessible < 50:  # Threshold for "trapped"
+            blocking_score += 5.0
+        
+        # Check if we're between opponent and large open areas
+        open_areas = self._find_open_areas(board)
+        for area_center, area_size in open_areas:
+            if area_size > 20:  # Large area
+                # Check if we're on the path between opponent and area
+                if self._is_on_path(opp_pos, area_center, my_pos):
+                    blocking_score += 3.0
+        
+        return blocking_score
+    
+    def _predict_opponent_moves(
+        self, 
+        opp_pos: Tuple[int, int], 
+        board: List[List[int]],
+        state: dict
+    ) -> List[str]:
+        """
+        Predict opponent's likely next moves.
+        
+        Args:
+            opp_pos: Opponent position
+            board: Board state
+            state: Full game state
+        
+        Returns:
+            List of predicted direction names
+        """
+        valid_opp_moves = self._get_valid_moves(opp_pos, board)
+        
+        if not valid_opp_moves:
+            return []
+        
+        # Simple prediction: opponent likely moves toward open space
+        predicted = []
+        
+        for move in valid_opp_moves:
+            dx, dy = self.directions[move]
+            new_pos = (opp_pos[0] + dx, opp_pos[1] + dy)
+            space = self._calculate_accessible_space(new_pos, board)
+            
+            if space > 30:  # Threshold
+                predicted.append(move)
+        
+        return predicted if predicted else valid_opp_moves
+    
+    def _is_on_path(
+        self, 
+        start: Tuple[int, int], 
+        end: Tuple[int, int], 
+        point: Tuple[int, int]
+    ) -> bool:
+        """
+        Check if a point is roughly on the path between start and end.
+        
+        Args:
+            start: Start position
+            end: End position
+            point: Point to check
+        
+        Returns:
+            True if point is on path
+        """
+        # Simple heuristic: check if point is within Manhattan distance
+        path_dist = abs(start[0] - end[0]) + abs(start[1] - end[1])
+        dist_via_point = (abs(start[0] - point[0]) + abs(start[1] - point[1]) + 
+                         abs(point[0] - end[0]) + abs(point[1] - end[1]))
+        
+        return dist_via_point <= path_dist + 2
+    
+    def _is_corner(self, position: Tuple[int, int]) -> bool:
+        """
+        Check if position is in a corner.
+        
+        Args:
+            position: Position to check
+        
+        Returns:
+            True if in corner
+        """
+        x, y = position
+        corners = [
+            (0, 0), (self.board_width - 1, 0),
+            (0, self.board_height - 1), 
+            (self.board_width - 1, self.board_height - 1)
+        ]
+        return position in corners
+
+
+# Global agent instance
+agent = TronAgent()
+
+
+def get_move(state: dict) -> str:
+    """
+    Main entry point for the game engine.
+    
+    This function is called by the game engine each tick.
+    
+    Args:
+        state: Dictionary containing:
+            - my_position: (x, y) tuple
+            - opponent_position: (x, y) tuple
+            - board: 2D list (0=empty, 1=wall/trail)
+            - boosts: List of available boosts (optional)
+            - turns_remaining: Number of turns left (optional)
+            - opponent_last_direction: Last direction opponent moved (optional)
+    
+    Returns:
+        str: Direction to move ('up', 'down', 'left', 'right')
+    """
+    return agent.get_move(state)
+
+    # Gather current state for decision-making
+    my_position = state.get("my_position", (0, 0))      
+    opponent_position = state.get("opponent_position", (19, 17))
+    board = state.get("board", [[0]*20 for _ in range(18)])
+    boosts = state.get("boosts", 0)     
+    turns_remaining = state.get("turns_remaining", 100)
+    opponent_last_direction = state.get("opponent_last_direction", None)        
     # -----------------end code here--------------------
 
     return jsonify({"move": move}), 200
